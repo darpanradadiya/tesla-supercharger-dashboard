@@ -2,8 +2,13 @@
 
 import streamlit as st
 import pandas as pd
+import numpy as np
+import math
 import plotly.express as px
+import plotly.graph_objects as go
 import pydeck as pdk
+import folium
+from streamlit_folium import st_folium
 
 # ─── Config & Branding ────────────────────────────────────────────────────────
 st.set_page_config(
@@ -17,22 +22,29 @@ DARK_BG     = "#171A20"
 # ─── Load & merge enhanced data ───────────────────────────────────────────────
 @st.cache_data
 def load_data():
-    # 1) sessions_enhanced.parquet has a 'region' column
     sess = pd.read_parquet("sessions_enhanced.parquet")
     sess["start_time"] = pd.to_datetime(sess["start_time"])
-    # 2) stations_enhanced.parquet also has 'region'
     stats = pd.read_parquet("stations_enhanced.parquet")
-    # Merge with suffixes so we can pick the station-region
-    df = sess.merge(
-        stats,
-        on="station_id",
-        suffixes=("_sess", "_stat")
-    )
-    # Drop the session-level region, keep station-level region
-    df = df.drop(columns=["region_sess"])
-    df = df.rename(columns={"region_stat": "region"})
+    df = sess.merge(stats, on="station_id", suffixes=("_sess","_stat"))
+    df = df.drop(columns=["region_sess"]).rename(columns={"region_stat":"region"})
     return df
 
+# Cache base Folium map for expansion analysis
+def make_base_map(stats):
+    m = folium.Map(location=[stats.lat.mean(), stats.lon.mean()], zoom_start=4)
+    for _, r in stats.iterrows():
+        folium.CircleMarker(
+            location=[r.lat, r.lon],
+            radius=4,
+            color="blue",
+            fill=True,
+            fill_opacity=0.7
+        ).add_to(m)
+    return m
+# Cache decorator to avoid re-creation
+get_base_map = st.cache_data(make_base_map)
+
+# Load data
 df = load_data()
 
 # ─── Sidebar Filters ──────────────────────────────────────────────────────────
@@ -51,7 +63,6 @@ region_sel = st.sidebar.multiselect(
     options=sorted(df.region.unique()),
     default=sorted(df.region.unique())
 )
-
 # Apply filters
 df = df.loc[
     (df.start_time.dt.date >= min_date) &
@@ -62,230 +73,143 @@ df = df.loc[
 
 # ─── KPI Cards ────────────────────────────────────────────────────────────────
 st.markdown("## 🔌 Tesla Supercharger Network Dashboard")
-total_sessions = df.session_id.nunique()
-avg_wait       = df.wait_time.mean()
-total_revenue  = df.revenue.sum()
-avg_nps        = df.satisfaction_nps.mean()
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total Sessions", f"{total_sessions:,}")
-c2.metric("Avg. Wait (min)", f"{avg_wait:.1f}")
-c3.metric("Total Revenue", f"${total_revenue:,.0f}")
-c4.metric("Avg. NPS", f"{avg_nps:.1f}")
+c1.metric("Total Sessions", f"{df.session_id.nunique():,}")
+c2.metric("Avg. Wait (min)", f"{df.wait_time.mean():.1f}")
+c3.metric("Total Revenue", f"${df.revenue.sum():,}")
+c4.metric("Avg. NPS", f"{df.satisfaction_nps.mean():.1f}")
 
-# ─── Tabs ─────────────────────────────────────────────────────────────────────
+# ─── Tabs Setup ───────────────────────────────────────────────────────────────
 tabs = st.tabs([
     "👋 Welcome",
     "1️⃣ Utilization Map",
     "2️⃣ Wait Times",
     "3️⃣ Busiest Stations",
     "4️⃣ Revenue vs Cost",
-    "5️⃣ Customer Satisfaction",
     "♾️ Queue & Capacity",
-    "🚀 Expansion Analysis"
 ])
 
-# Tab 0: Welcome
+# ─── Tab 0: Welcome ───────────────────────────────────────────────────────────
 with tabs[0]:
     st.header("Welcome!")
     st.write(
-        "Use the sidebar to filter by date range, charger type, and region, "
-        "then explore each tab for insights on utilization, wait times, station performance, profitability, and expansion planning."
+        "Use the sidebar filters to narrow by date range, charger type, and region, "
+        "then explore tabs for utilization, wait times, station performance, profitability, and expansion planning."
     )
 
-# Tab 1: Utilization Map
+# ─── Tab 1: Utilization Map ───────────────────────────────────────────────────
 with tabs[1]:
     st.header("Network Utilization Map")
-    style = st.selectbox(
-        "Map Style",
-        ["Plotly Scatter Mapbox", "Density Heatmap"]
-    )
-
+    style = st.selectbox("Map Style", ["Plotly Scatter Map", "Density Map"])
     util = (
-        df.groupby(["station_id","station_name","lat","lon"])
-          .agg(sessions=("session_id","count"), avg_wait=("wait_time","mean"))
+        df.groupby(["station_id","station_name","lat","lon"])  \
+          .agg(sessions=("session_id","count"), avg_wait=("wait_time","mean"))  \
           .reset_index()
     )
-
-    if style == "Plotly Scatter Mapbox":
+    if style == "Plotly Scatter Map":
         util["size"]  = util.sessions / util.sessions.max() * 50
-        util["color"] = (
-            util.avg_wait - util.avg_wait.min()
-        ) / (
-            util.avg_wait.max() - util.avg_wait.min()
-        )
-        fig = px.scatter_mapbox(
+        util["color"] = (util.avg_wait - util.avg_wait.min()) / (util.avg_wait.max() - util.avg_wait.min())
+        fig = px.scatter_map(
             util,
-            lat="lat",
-            lon="lon",
-            size="size",
-            color="color",
+            lat="lat", lon="lon",
+            size="size", color="color",
             hover_name="station_name",
             hover_data=["sessions","avg_wait"],
             color_continuous_scale="Reds",
-            size_max=50
-        )
-        fig.update_layout(
-            mapbox_style="open-street-map",
-            margin={"l":0,"r":0,"t":30,"b":0}
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    else:  # Density Heatmap
-        fig = px.density_mapbox(
-            util,
-            lat="lat",
-            lon="lon",
-            z="sessions",
-            radius=25,
-            center={"lat":util.lat.mean(),"lon":util.lon.mean()},
+            size_max=50,
             zoom=4,
-            mapbox_style="open-street-map",
+            center={"lat": util.lat.mean(), "lon": util.lon.mean()}
+        )
+        fig.update_layout(margin=dict(l=0,r=0,t=30,b=0))
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        fig = px.density_map(
+            util,
+            lat="lat", lon="lon", z="sessions",
+            radius=25,
+            zoom=4,
+            center={"lat": util.lat.mean(), "lon": util.lon.mean()},
             color_continuous_scale="Reds"
         )
+        fig.update_layout(margin=dict(l=0,r=0,t=30,b=0))
         st.plotly_chart(fig, use_container_width=True)
 
-# Tab 2: Wait Times
+# ─── Tab 2: Wait Times ─────────────────────────────────────────────────────────
 with tabs[2]:
     st.header("Average Wait Time Over Time")
-    ts = df.set_index("start_time").resample("D").wait_time.mean().reset_index()
-    fig = px.line(
-        ts,
-        x="start_time",
-        y="wait_time",
-        title="Daily Avg. Wait Time (mins)",
-        color_discrete_sequence=[PRIMARY_RED],
-        labels={"start_time":"Date","wait_time":"Wait (mins)"}
-    )
+    ts = df.set_index("start_time").resample("D").agg({
+        "wait_time":"mean",
+        "session_id":"count",
+        "local_event":"max"
+    }).rename(columns={"session_id":"sessions","local_event":"event_occurred"}).reset_index()
+    ts["event_occurred"] = ts.event_occurred.fillna(False).astype(bool)
+    ts["roll7"] = ts.wait_time.rolling(7, center=True).mean()
+    mu, sigma = ts.wait_time.mean(), ts.wait_time.std()
+    ts["anomaly"] = ts.wait_time > (mu + 2*sigma)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=ts.start_time, y=ts.wait_time, mode="lines",
+                              line=dict(color="rgba(204,0,0,0.2)"), name="Daily Avg Wait"))
+    fig.add_trace(go.Scatter(x=ts.start_time, y=ts.roll7, mode="lines",
+                              line=dict(color=PRIMARY_RED, width=3), name="7D Rolling Avg"))
+    fig.add_trace(go.Scatter(x=ts.loc[ts.anomaly, "start_time"], y=ts.loc[ts.anomaly, "wait_time"],
+                              mode="markers", marker=dict(color="black", size=6), name="Anomaly (>2σ)"))
+    for d in ts.loc[ts.event_occurred, "start_time"]:
+        fig.add_vline(x=d, line_dash="dot", line_color="gray", opacity=0.3)
+    fig.update_layout(title="Daily Avg Wait with Rolling Avg, Anomalies & Events",
+                      xaxis_title="Date", yaxis_title="Wait (mins)",
+                      xaxis=dict(rangeslider=dict(visible=True)),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     st.plotly_chart(fig, use_container_width=True)
     with st.expander("Download CSV"):
         st.download_button("Download", ts.to_csv(index=False), "wait_times.csv", "text/csv")
 
-# Tab 3: Busiest Stations
+# ─── Tab 3: Busiest Stations ───────────────────────────────────────────────────
 with tabs[3]:
     st.header("Top 10 Busiest Stations")
-    top10 = (
-        df.station_name
-          .value_counts()
-          .nlargest(10)
-          .rename_axis("station_name")
-          .reset_index(name="sessions")
-    )
-    fig = px.bar(
-        top10,
-        x="sessions",
-        y="station_name",
-        orientation="h",
-        title="Sessions by Station",
-        color_discrete_sequence=[PRIMARY_RED],
-        labels={"sessions":"Sessions","station_name":"Station"}
-    )
+    top10 = df.station_name.value_counts().nlargest(10)
+    top10 = top10.rename_axis("station_name").reset_index(name="sessions")
+    fig = px.bar(top10, x="sessions", y="station_name", orientation="h",
+                 color_discrete_sequence=[PRIMARY_RED], labels={"sessions":"Sessions","station_name":"Station"},
+                 title="Sessions by Station")
     st.plotly_chart(fig, use_container_width=True)
     with st.expander("Download CSV"):
         st.download_button("Download", top10.to_csv(index=False), "top10_stations.csv", "text/csv")
 
-# Tab 4: Revenue vs Cost
+# ─── Tab 4: Revenue vs Cost ────────────────────────────────────────────────────
 with tabs[4]:
     st.header("Revenue vs. Cost per Station")
-    revcost = (
-        df.groupby("station_name")
-          .agg({"revenue":"sum","cost":"sum"})
-          .reset_index()
-    )
-    fig = px.bar(
-        revcost,
-        x="station_name",
-        y=["revenue","cost"],
-        barmode="group",
-        title="Total Revenue vs Total Cost",
-        color_discrete_map={"revenue":PRIMARY_RED,"cost":DARK_BG},
-        labels={"value":"USD","station_name":"Station","variable":"Metric"}
-    )
+    revcost = df.groupby("station_name").agg({"revenue":"sum","cost":"sum"}).reset_index()
+    fig = px.bar(revcost, x="station_name", y=["revenue","cost"], barmode="group",
+                 color_discrete_map={"revenue":PRIMARY_RED, "cost":DARK_BG},
+                 labels={"value":"USD","station_name":"Station","variable":"Metric"},
+                 title="Total Revenue vs Total Cost")
     st.plotly_chart(fig, use_container_width=True)
     with st.expander("Download CSV"):
         st.download_button("Download", revcost.to_csv(index=False), "revenue_vs_cost.csv", "text/csv")
 
-# Tab 5: Customer Satisfaction
+# ─── Tab 5: Queue & Capacity ───────────────────────────────────────────────────
 with tabs[5]:
-    st.header("Customer Satisfaction (NPS) by Region")
-    nps = df.groupby("region").satisfaction_nps.mean().reset_index()
-    fig = px.bar(
-        nps,
-        x="region",
-        y="satisfaction_nps",
-        color_discrete_sequence=[PRIMARY_RED],
-        labels={"region":"Region","satisfaction_nps":"NPS"}
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    with st.expander("Download CSV"):
-        st.download_button("Download", nps.to_csv(index=False), "nps_by_region.csv", "text/csv")
-
-# Tab 6: Queue & Capacity
-with tabs[6]:
-    st.header("Queue & Capacity Analysis")
+    st.header("Queue & Capacity Analysis (Novice View)")
+    medians = df.groupby("station_name").queue_length.median().sort_values(ascending=False)
+    top10_q = medians.head(10).index.tolist()
+    df["is_top10_q"] = df.station_name.isin(top10_q)
+    df["is_top10_i"] = df.station_name.isin(top10_q)
     fig_q = px.box(
-        df,
-        x="station_name",
-        y="queue_length",
-        color_discrete_sequence=[PRIMARY_RED],
-        labels={"station_name":"Station","queue_length":"Queue Length"}
-    )
-    fig_q.update_layout(xaxis={"categoryorder":"total descending"})
+        df, x="queue_length", y="station_name", orientation="h",
+        category_orders={"station_name": medians.index.tolist()},
+        color="is_top10_q", color_discrete_map={True:PRIMARY_RED, False:"#CCCCCC"},
+        labels={"queue_length":"Queue Length","station_name":"Station"},
+        title="Queue Length Distribution")
+    fig_q.add_vline(x=3, line_dash="dash", line_color="darkred", annotation_text=">3 queued", annotation_position="top right")
     st.plotly_chart(fig_q, use_container_width=True)
-
     fig_i = px.box(
-        df,
-        x="station_name",
-        y="idle_time",
-        color_discrete_sequence=[DARK_BG],
-        labels={"station_name":"Station","idle_time":"Idle Ports"}
-    )
-    fig_i.update_layout(xaxis={"categoryorder":"total descending"})
+        df, x="idle_time", y="station_name", orientation="h",
+        category_orders={"station_name": medians.index.tolist()},
+        color="is_top10_i", color_discrete_map={True:DARK_BG, False:"#EEEEEE"},
+        labels={"idle_time":"Idle Ports","station_name":"Station"},
+        title="Idle Ports Distribution")
+    fig_i.add_vline(x=1, line_dash="dash", line_color="gray", annotation_text="<1 idle", annotation_position="top right")
     st.plotly_chart(fig_i, use_container_width=True)
-
+    df.drop(columns=["is_top10_q","is_top10_i"], inplace=True)
     with st.expander("Download CSV"):
-        st.download_button(
-            "Download",
-            df[["station_name","queue_length","idle_time"]].to_csv(index=False),
-            "queue_capacity.csv",
-            "text/csv"
-        )
-
-# Tab 7: Expansion Analysis
-with tabs[7]:
-    st.header("Expansion Analysis")
-    stats = pd.read_parquet("stations_enhanced.parquet")
-    exp = stats.sort_values("expansion_benefit", ascending=False)[
-        ["station_name","nearest_dist_km","expansion_benefit"]
-    ].head(10)
-    st.subheader("Top 10 Stations by Expansion Benefit")
-    st.dataframe(exp, use_container_width=True)
-
-    with st.expander("Download CSV"):
-        st.download_button(
-            "Download",
-            stats.to_csv(index=False),
-            "stations_expansion.csv",
-            "text/csv"
-        )
-
-    icon_layer_exp = pdk.Layer(
-        "IconLayer",
-        data=stats,
-        pickable=True,
-        icon_atlas="https://raw.githubusercontent.com/visgl/deck.gl-data/master/website/icon-atlas.png",
-        icon_mapping={"marker": {"x": 0, "y": 0, "width": 128, "height": 128, "anchorY": 128}},
-        get_icon='"marker"',
-        get_size="expansion_benefit * 100",
-        size_scale=1,
-        get_position=["lon","lat"],
-        get_color="[0, expansion_benefit*255, 0]"
-    )
-    view_state_exp = pdk.ViewState(
-        latitude=stats.lat.mean(),
-        longitude=stats.lon.mean(),
-        zoom=4
-    )
-    st.pydeck_chart(
-        pdk.Deck(layers=[icon_layer_exp], initial_view_state=view_state_exp),
-        use_container_width=True
-    )
+        st.download_button("Download", df[["station_name","queue_length","idle_time"]].to_csv(index=False), "queue_capacity.csv", "text/csv")
