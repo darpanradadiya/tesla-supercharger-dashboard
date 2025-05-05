@@ -1,9 +1,9 @@
 streamlit==1.45.0
-streamlit-folium==0.10.1
+streamlit-folium==0.23.2
 pandas==2.2.3
 numpy==2.2.5
 plotly==6.0.1
 pydeck==0.9.1
 folium==0.19.5
 pyarrow==20.0.0
-watchdog==6.0.0  # optional, improves FS watching performance on Mac
+watchdog==6.0.0
