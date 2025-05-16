@@ -12,7 +12,7 @@ My goal with this dashboard is to equip Tesla management, regional planners, and
 * Compare station-level profitability by juxtaposing revenue against operating costs.
 * Prioritize network expansions to deliver the greatest wait‑time reduction and revenue uplift.
 
-To power these analyses, I generated a realistic **three-year synthetic dataset**—including station metadata, hourly sessions, local weather, special events, and traffic volumes—so every chart reflects plausible, data‑driven operational dynamics. citeturn1file0
+To power these analyses, I generated a realistic **three-year synthetic dataset**—including station metadata, hourly sessions, local weather, special events, and traffic volumes—so every chart reflects plausible, data‑driven operational dynamics.
 
 ---
 
